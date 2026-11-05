@@ -73,7 +73,30 @@ header.site{position:sticky;top:0;z-index:60;background:rgba(251,246,238,.92);ba
 @keyframes pageIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
 .reveal{opacity:1;transform:none}
 .reveal.in{opacity:1;transform:none}
-@media (prefers-reduced-motion:reduce){.reveal{opacity:1;transform:none;transition:none}.page.active{animation:none}html{scroll-behavior:auto}}
+/* ===== Motion system (added) — content is visible by default.
+   JS adds .m-pre only moments before observing; if JS/IO never runs,
+   nothing is ever hidden. Image-bearing cards use transform ONLY. ===== */
+.m-reveal-text{opacity:0;transform:translateY(24px);transition:opacity .85s ease,transform .85s cubic-bezier(.22,1,.36,1)}
+.m-reveal-text.m-in{opacity:1;transform:translateY(0)}
+.m-reveal-move{transform:translateY(18px);transition:transform .85s cubic-bezier(.22,1,.36,1)}
+.m-reveal-move.m-in{transform:translateY(0)}
+/* hero pointer / scroll parallax (transform only, driven by CSS vars set from JS) */
+.hero{--px:0;--py:0;--sy:0px}
+.hero::before{transform:translate3d(calc(var(--px)*26px),calc(var(--py)*18px + var(--sy)*.35),0)}
+.hero::after{transform:translate3d(calc(var(--px)*-18px),calc(var(--py)*-12px + var(--sy)*.2),0)}
+.hero-media{transform:translate3d(calc(var(--px)*-9px),calc(var(--py)*-7px + var(--sy)*.5),0);will-change:transform}
+.hero-badge{animation:badgeFloat 5.5s ease-in-out infinite}
+@keyframes badgeFloat{0%,100%{transform:translateY(0)}50%{transform:translateY(-7px)}}
+.hero-card{animation:cardFloat 7s ease-in-out infinite}
+@keyframes cardFloat{0%,100%{transform:translateY(0)}50%{transform:translateY(6px)}}
+/* custom cursor — additive only: the native cursor is NEVER hidden */
+.cursor-dot,.cursor-ring{position:fixed;top:0;left:0;pointer-events:none;border-radius:50%;z-index:9999;opacity:0}
+.cursor-dot{width:7px;height:7px;background:var(--blush-deep);box-shadow:0 0 0 3px rgba(238,201,198,.45)}
+.cursor-ring{width:36px;height:36px;border:1.5px solid rgba(185,95,116,.55);transition:width .25s ease,height .25s ease,border-color .25s ease,background-color .25s ease,opacity .3s ease}
+.cursor-ring.is-hover{width:56px;height:56px;background:rgba(238,201,198,.20);border-color:rgba(51,22,47,.5)}
+body.cursor-active .cursor-dot,body.cursor-active .cursor-ring{opacity:1}
+@media (hover:none),(pointer:coarse){.cursor-dot,.cursor-ring{display:none!important}}
+@media (prefers-reduced-motion:reduce){.reveal{opacity:1;transform:none;transition:none}.page.active{animation:none}html{scroll-behavior:auto}.m-reveal-text,.m-reveal-move{opacity:1!important;transform:none!important;transition:none!important}.hero-media,.hero::before,.hero::after{transform:none!important}.hero-badge,.hero-card,.marquee-track{animation:none!important}.cursor-dot,.cursor-ring{display:none!important}}
 /* hero */
 .hero{position:relative;overflow:hidden;background:linear-gradient(160deg,#fbf6ee 0%,#f7e8e2 55%,#efd9d4 100%)}
 .hero::before{content:"";position:absolute;width:640px;height:640px;border-radius:50%;background:radial-gradient(circle,rgba(185,95,116,.20),transparent 65%);top:-220px;right:-120px}
@@ -1027,6 +1050,103 @@ function initReveals(){
   els.forEach(function(el){io.observe(el);});
 }
 initReveals();
+})();
+</script>
+<script>
+(function(){
+"use strict";
+/* Motion layer: scroll reveals + hero parallax + custom cursor.
+   Fully disabled for reduced-motion and for touch/coarse pointers. */
+var reduceMq=window.matchMedia("(prefers-reduced-motion: reduce)");
+if(reduceMq.matches) return;
+var finePointer=window.matchMedia("(hover: hover) and (pointer: fine)").matches && !("ontouchstart" in window && navigator.maxTouchPoints>0 && window.innerWidth<1024);
+
+/* ---------- 1. Scroll reveals ---------- */
+var textTargets=document.querySelectorAll(".reveal, .step, .testi, .value");
+var moveTargets=document.querySelectorAll(".cat-card, .course-card, .ws-card, .ws-row, .dash-card, .form-card, .info-card");
+function prep(list,cls){
+  var arr=[];
+  list.forEach(function(el,i){
+    if(el.classList.contains("m-in"))return;
+    el.classList.add(cls);
+    el.style.transitionDelay=((i%3)*70)+"ms";
+    arr.push(el);
+  });
+  return arr;
+}
+var allReveal=prep(textTargets,"m-reveal-text").concat(prep(moveTargets,"m-reveal-move"));
+if("IntersectionObserver" in window){
+  var io2=new IntersectionObserver(function(entries){
+    entries.forEach(function(en){
+      if(en.isIntersecting){en.target.classList.add("m-in");io2.unobserve(en.target);}
+    });
+  },{threshold:.08,rootMargin:"0px 0px 500px 0px"});
+  allReveal.forEach(function(el){io2.observe(el);});
+  /* Safety net: nothing may stay hidden — reveal everything after a short grace period. */
+  setTimeout(function(){allReveal.forEach(function(el){el.classList.add("m-in");});if(io2)io2.disconnect();},2600);
+}else{
+  allReveal.forEach(function(el){el.classList.add("m-in");});
+}
+/* Page switches re-arm the safety net for the newly shown page */
+document.addEventListener("click",function(e){
+  if(e.target.closest("[data-nav]")){
+    setTimeout(function(){
+      document.querySelectorAll(".page.active .m-reveal-text:not(.m-in), .page.active .m-reveal-move:not(.m-in)").forEach(function(el){el.classList.add("m-in");});
+    },650);
+  }
+});
+
+/* ---------- 2. Hero parallax (mouse + gentle scroll drift) ---------- */
+var hero=document.querySelector(".hero");
+if(hero && finePointer){
+  var tx=0,ty=0,cx=0,cy=0,scrollShift=0,rafId=null;
+  function loop(){
+    cx+=(tx-cx)*.06; cy+=(ty-cy)*.06;
+    var sy=Math.min(window.scrollY,600)*.08;
+    scrollShift+=(sy-scrollShift)*.08;
+    hero.style.setProperty("--px",cx.toFixed(3));
+    hero.style.setProperty("--py",cy.toFixed(3));
+    hero.style.setProperty("--sy",scrollShift.toFixed(1)+"px");
+    if(Math.abs(tx-cx)>.001||Math.abs(ty-cy)>.001||Math.abs(sy-scrollShift)>.1){rafId=requestAnimationFrame(loop);}
+    else{rafId=null;}
+  }
+  function kick(){if(!rafId)rafId=requestAnimationFrame(loop);}
+  hero.addEventListener("mousemove",function(e){
+    var r=hero.getBoundingClientRect();
+    tx=((e.clientX-r.left)/r.width-.5)*2;
+    ty=((e.clientY-r.top)/r.height-.5)*2;
+    kick();
+  });
+  hero.addEventListener("mouseleave",function(){tx=0;ty=0;kick();});
+  window.addEventListener("scroll",function(){if(window.scrollY<900)kick();},{passive:true});
+}
+
+/* ---------- 3. Custom cursor (desktop, fine pointer only) ---------- */
+if(finePointer){
+  var dot=document.createElement("div");dot.className="cursor-dot";dot.setAttribute("aria-hidden","true");
+  var ring=document.createElement("div");ring.className="cursor-ring";ring.setAttribute("aria-hidden","true");
+  document.body.appendChild(ring);document.body.appendChild(dot);
+  var mx=-100,my=-100,rx=-100,ry=-100,shown=false,craf=null;
+  function cloop(){
+    rx+=(mx-rx)*.16; ry+=(my-ry)*.16;
+    dot.style.transform="translate3d("+mx+"px,"+my+"px,0) translate(-50%,-50%)";
+    ring.style.transform="translate3d("+rx+"px,"+ry+"px,0) translate(-50%,-50%)";
+    if(Math.abs(mx-rx)>.1||Math.abs(my-ry)>.1){craf=requestAnimationFrame(cloop);}
+    else{craf=null;}
+  }
+  function ckick(){if(!craf)craf=requestAnimationFrame(cloop);}
+  document.addEventListener("mousemove",function(e){
+    mx=e.clientX;my=e.clientY;
+    if(!shown){rx=mx;ry=my;shown=true;document.body.classList.add("cursor-active");}
+    ckick();
+  },{passive:true});
+  document.addEventListener("mouseleave",function(){shown=false;document.body.classList.remove("cursor-active");});
+  document.addEventListener("mouseover",function(e){
+    var hot=e.target.closest("a, button, .chip, input, select, textarea, summary, details, .cat-card, .course-card");
+    ring.classList.toggle("is-hover",!!hot);
+  },{passive:true});
+}
+reduceMq.addEventListener&&reduceMq.addEventListener("change",function(e){if(e.matches){document.querySelectorAll(".cursor-dot,.cursor-ring").forEach(function(n){n.remove();});document.body.classList.remove("cursor-active");document.querySelectorAll(".m-reveal-text,.m-reveal-move").forEach(function(el){el.classList.add("m-in");});}});
 })();
 </script>
 </body>
